@@ -9,7 +9,8 @@ import re
 from datetime import datetime
 
 # --- Constants & Versioning ---
-VERSION = "3.1.4"
+# v3.2.0 - Added date filter (Download Everything / From Date Forward / Date Range)
+VERSION = "3.2.0"
 CONFIG_FILE = "wordly_config.json"
 INVENTORY_FILE = "wordly_inventory.json"
 BASE_URL = "https://api.wordly.ai"
@@ -18,7 +19,7 @@ class WordlyDownloaderApp:
     def __init__(self, root):
         self.root = root
         self.root.title(f"Wordly Transcript Downloader - v{VERSION}")
-        self.root.geometry("1000x900")
+        self.root.geometry("1000x950")
         
         # --- State Variables ---
         self.api_key = tk.StringVar()
@@ -31,6 +32,11 @@ class WordlyDownloaderApp:
         self.want_srt = tk.BooleanVar(value=False)
         self.want_xml = tk.BooleanVar(value=False)
 
+        # --- Date Filter ---
+        self.date_filter_mode = tk.StringVar(value="all")  # all | from_date | date_range
+        self.date_filter_from = tk.StringVar(value="")
+        self.date_filter_to = tk.StringVar(value="")
+
         self.load_settings()
         self.setup_ui()
         
@@ -38,7 +44,6 @@ class WordlyDownloaderApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def setup_ui(self):
-        # Configure a global style for the fonts
         style = ttk.Style()
         style.configure("TLabel", font=("TkDefaultFont", 12))
         style.configure("TButton", font=("TkDefaultFont", 12))
@@ -70,19 +75,97 @@ class WordlyDownloaderApp:
         # 4. Formats
         fmt_frame = ttk.LabelFrame(main_frame, text=" Select File Formats ", padding="20")
         fmt_frame.pack(fill=tk.X, pady=10)
-        # Using standard tk Checkbuttons as ttk doesn't handle font sizes as cleanly in some Windows builds
         tk.Checkbutton(fmt_frame, text="Plain Text (.txt)", variable=self.want_txt, font=("TkDefaultFont", 12)).pack(side=tk.LEFT, padx=20)
         tk.Checkbutton(fmt_frame, text="Subtitles (.srt)", variable=self.want_srt, font=("TkDefaultFont", 12)).pack(side=tk.LEFT, padx=20)
         tk.Checkbutton(fmt_frame, text="Custom XML (.xml)", variable=self.want_xml, font=("TkDefaultFont", 12)).pack(side=tk.LEFT, padx=20)
 
-        # 5. Start Button
+        # 5. Date Filter
+        filter_frame = ttk.LabelFrame(main_frame, text=" Download Filter ", padding="20")
+        filter_frame.pack(fill=tk.X, pady=10)
+
+        tk.Radiobutton(filter_frame, text="Download Everything", variable=self.date_filter_mode,
+            value="all", font=("TkDefaultFont", 12), command=self.toggle_date_fields).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(filter_frame, text="From Date Forward", variable=self.date_filter_mode,
+            value="from_date", font=("TkDefaultFont", 12), command=self.toggle_date_fields).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(filter_frame, text="Date Range", variable=self.date_filter_mode,
+            value="date_range", font=("TkDefaultFont", 12), command=self.toggle_date_fields).pack(side=tk.LEFT, padx=10)
+
+        date_fields_frame = ttk.Frame(main_frame)
+        date_fields_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.lbl_from = ttk.Label(date_fields_frame, text="From (YYYY-MM-DD):", font=("TkDefaultFont", 12))
+        self.lbl_from.pack(side=tk.LEFT, padx=(0, 5))
+        self.entry_from = ttk.Entry(date_fields_frame, textvariable=self.date_filter_from, width=14, font=("TkDefaultFont", 12))
+        self.entry_from.pack(side=tk.LEFT, padx=(0, 20))
+
+        self.lbl_to = ttk.Label(date_fields_frame, text="To (YYYY-MM-DD):", font=("TkDefaultFont", 12))
+        self.lbl_to.pack(side=tk.LEFT, padx=(0, 5))
+        self.entry_to = ttk.Entry(date_fields_frame, textvariable=self.date_filter_to, width=14, font=("TkDefaultFont", 12))
+        self.entry_to.pack(side=tk.LEFT)
+
+        self.toggle_date_fields()
+
+        # 6. Start Button
         self.btn_toggle = ttk.Button(main_frame, text="START DOWNLOADER", command=self.toggle_agent)
         self.btn_toggle.pack(pady=25)
 
-        # 6. Activity Log
+        # 7. Activity Log
         ttk.Label(main_frame, text="Activity Log:", font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W)
         self.log_text = tk.Text(main_frame, height=30, width=120, state='disabled', font=("Courier New", 12), bg="white", fg="black")
         self.log_text.pack(pady=5, fill=tk.BOTH, expand=True)
+
+    def toggle_date_fields(self):
+        mode = self.date_filter_mode.get()
+        if mode == "all":
+            self.lbl_from.config(foreground="grey")
+            self.entry_from.config(state="disabled")
+            self.lbl_to.config(foreground="grey")
+            self.entry_to.config(state="disabled")
+        elif mode == "from_date":
+            self.lbl_from.config(foreground="black")
+            self.entry_from.config(state="normal")
+            self.lbl_to.config(foreground="grey")
+            self.entry_to.config(state="disabled")
+        elif mode == "date_range":
+            self.lbl_from.config(foreground="black")
+            self.entry_from.config(state="normal")
+            self.lbl_to.config(foreground="black")
+            self.entry_to.config(state="normal")
+
+    def is_in_date_filter(self, transcript):
+        mode = self.date_filter_mode.get()
+        if mode == "all":
+            return True
+        raw = transcript.get("startTime", "")
+        if not raw:
+            return True  # no date on record, let it through
+        try:
+            t_date = datetime.strptime(raw[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return True
+        if mode == "from_date":
+            from_str = self.date_filter_from.get().strip()
+            if not from_str:
+                return True
+            try:
+                from_date = datetime.strptime(from_str, "%Y-%m-%d").date()
+                return t_date >= from_date
+            except ValueError:
+                self.log("⚠️ Invalid 'From' date format. Use YYYY-MM-DD.")
+                return True
+        if mode == "date_range":
+            from_str = self.date_filter_from.get().strip()
+            to_str = self.date_filter_to.get().strip()
+            if not from_str or not to_str:
+                return True
+            try:
+                from_date = datetime.strptime(from_str, "%Y-%m-%d").date()
+                to_date = datetime.strptime(to_str, "%Y-%m-%d").date()
+                return from_date <= t_date <= to_date
+            except ValueError:
+                self.log("⚠️ Invalid date range format. Use YYYY-MM-DD.")
+                return True
+        return True
 
     def on_closing(self):
         if self.is_running:
@@ -112,14 +195,20 @@ class WordlyDownloaderApp:
                     self.api_key.set(data.get("api_key", ""))
                     self.download_path.set(data.get("download_path", self.download_path.get()))
                     self.sync_interval.set(data.get("sync_interval", "1"))
+                    self.date_filter_mode.set(data.get("date_filter_mode", "all"))
+                    self.date_filter_from.set(data.get("date_filter_from", ""))
+                    self.date_filter_to.set(data.get("date_filter_to", ""))
             except: pass
 
     def save_settings(self):
         with open(CONFIG_FILE, 'w') as f:
             json.dump({
-                "api_key": self.api_key.get().strip(), 
+                "api_key": self.api_key.get().strip(),
                 "download_path": self.download_path.get(),
-                "sync_interval": self.sync_interval.get()
+                "sync_interval": self.sync_interval.get(),
+                "date_filter_mode": self.date_filter_mode.get(),
+                "date_filter_from": self.date_filter_from.get(),
+                "date_filter_to": self.date_filter_to.get()
             }, f)
 
     def toggle_agent(self):
@@ -157,7 +246,10 @@ class WordlyDownloaderApp:
                     for t in transcripts:
                         if not self.is_running: break
                         if t['transcriptId'] not in self.processed_ids:
-                            self.process_new_transcript(t, headers)
+                            if self.is_in_date_filter(t):
+                                self.process_new_transcript(t, headers)
+                            else:
+                                self.processed_ids[t['transcriptId']] = "skipped_date_filter"
                 else:
                     self.log(f"⚠️ API Error {res.status_code}")
             except Exception as e:
@@ -215,7 +307,6 @@ class WordlyDownloaderApp:
         os.makedirs(master_folder, exist_ok=True)
         
         clean_title = self.sanitize(t['title'])
-        # Filename: YYYY-MM-DD_HH-MM-SS_Title_SessionID
         base_name = f"{t['startTime'][:10]}_{now.strftime('%H-%M-%S')}_{clean_title}_{s_id}"
         self.log(f"✨ NEW: {t['title']}")
         
